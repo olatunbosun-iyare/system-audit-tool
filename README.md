@@ -21,7 +21,7 @@ A cross-platform Python script that collects system information, user sessions, 
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/system-inventory-audit.git
+git clone https://github.com/olatunbosun-iyare/system-inventory-audit.git
 cd system-inventory-audit
 ```
 
