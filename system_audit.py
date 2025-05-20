@@ -1,6 +1,5 @@
 import platform
 import socket
-import psutil
 from getmac import get_mac_address
 import json
 import subprocess
@@ -16,34 +15,96 @@ def get_system_info():
         "Processor": platform.processor(),
         "IP Address": socket.gethostbyname(socket.gethostname()),
         "MAC Address": get_mac_address(),
-        "RAM (GB)": round(psutil.virtual_memory().total / (1024 ** 3), 2)
+        "RAM (GB)": get_total_memory()
     }
 
 
+def get_total_memory():
+    os_type = platform.system()
+
+    try:
+        if os_type == "Windows":
+            output = subprocess.check_output(
+                "wmic memorychip get capacity", shell=True)
+            lines = output.decode().split()
+            capacities = [int(x) for x in lines if x.isdigit()]
+            return round(sum(capacities) / (1024 ** 3), 2)
+
+        elif os_type == "Linux":
+            with open('/proc/meminfo', 'r') as f:
+                meminfo = f.read()
+            for line in meminfo.splitlines():
+                if "MemTotal" in line:
+                    kb = int(line.split()[1])
+                    return round(kb / (1024 ** 2), 2)
+
+        elif os_type == "Darwin":  # macOS
+            output = subprocess.check_output(["sysctl", "hw.memsize"])
+            mem_bytes = int(output.decode().split(":")[1].strip())
+            return round(mem_bytes / (1024 ** 3), 2)
+
+    except Exception as e:
+        return f"Error: {e}"
+
+
 def get_disk_usage():
+    os_type = platform.system()
     disks = []
-    for partition in psutil.disk_partitions():
-        try:
-            usage = psutil.disk_usage(partition.mountpoint)
-            disks.append({
-                "Device": partition.device,
-                "Mount Point": partition.mountpoint,
-                "Usage (%)": usage.percent
-            })
-        except PermissionError:
-            continue
+
+    try:
+        if os_type == "Windows":
+            output = subprocess.check_output(
+                "wmic logicaldisk get deviceid,freespace,size", shell=True)
+            lines = output.decode().splitlines()[1:]
+            for line in lines:
+                parts = line.split()
+                if len(parts) == 3:
+                    device, free, size = parts
+                    if size.isdigit() and int(size) > 0:
+                        used_percent = 100 - (int(free) / int(size)) * 100
+                        disks.append({
+                            "Device": device,
+                            "Mount Point": device,
+                            "Usage (%)": round(used_percent, 2)
+                        })
+
+        elif os_type in ["Linux", "Darwin"]:
+            output = subprocess.check_output(["df", "-h", "/"])
+            lines = output.decode().splitlines()[1:]
+            for line in lines:
+                parts = line.split()
+                if len(parts) >= 6:
+                    device, size, used, avail, percent, mount = parts[:6]
+                    disks.append({
+                        "Device": device,
+                        "Mount Point": mount,
+                        "Usage (%)": percent
+                    })
+
+    except Exception as e:
+        disks.append({"Error": str(e)})
+
     return disks
 
 
 def get_logged_in_users():
     users = []
-    for user in psutil.users():
-        readable_time = datetime.fromtimestamp(
-            user.started).strftime("%Y-%m-%d %H:%M:%S")
-        users.append({
-            "Username": user.name,
-            "Login Time": readable_time
-        })
+    try:
+        output = subprocess.check_output("who", shell=True)
+        lines = output.decode().splitlines()
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 3:
+                username = parts[0]
+                login_time = " ".join(parts[2:4]) if len(
+                    parts) >= 4 else parts[2]
+                users.append({
+                    "Username": username,
+                    "Login Time": login_time
+                })
+    except Exception as e:
+        users.append({"Error": str(e)})
+
     return users
 
 
@@ -71,7 +132,7 @@ def get_installed_software():
                 if line:
                     software_list.append(line.strip())
 
-        elif os_type == "Darwin":  # macOS
+        elif os_type == "Darwin":
             output = subprocess.check_output(
                 ['system_profiler', 'SPApplicationsDataType'])
             lines = output.decode(errors="ignore").split('\n')
@@ -116,12 +177,10 @@ def save_run_log(run_log):
 
 
 if __name__ == "__main__":
-    # Load run log to get previous count
     run_log = load_run_log()
     run_count = run_log.get("run_count", 0) + 1
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Prepare the new report data (replace these with your actual functions)
     new_report = {
         "Report Number": run_count,
         "Generated At": now,
@@ -131,12 +190,10 @@ if __name__ == "__main__":
         "Installed Software": get_installed_software()
     }
 
-    # Load existing reports, append new one, then save
     reports = load_reports()
     reports.append(new_report)
     save_reports(reports)
 
-    # Update and save run log
     run_log["run_count"] = run_count
     run_log["last_run"] = now
     save_run_log(run_log)
