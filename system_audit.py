@@ -1,86 +1,57 @@
 import platform
 import socket
-from getmac import get_mac_address
 import json
 import subprocess
 import os
+import psutil
 from datetime import datetime
+from getmac import get_mac_address
 
 
 def get_system_info():
+    # Get IP address by connecting to a public DNS (doesn't actually send data)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip_address = s.getsockname()[0]
+        s.close()
+    except Exception:
+        ip_address = "127.0.0.1"
+
     return {
         "Hostname": socket.gethostname(),
         "Operating System": f"{platform.system()} {platform.release()}",
         "Architecture": platform.machine(),
         "Processor": platform.processor(),
-        "IP Address": socket.gethostbyname(socket.gethostname()),
+        "IP Address": ip_address,
         "MAC Address": get_mac_address(),
-        "RAM (GB)": get_total_memory()
+        "RAM (GB)": round(psutil.virtual_memory().total / (1024 ** 3), 2)
     }
 
 
-def get_total_memory():
-    os_type = platform.system()
-
-    try:
-        if os_type == "Windows":
-            output = subprocess.check_output(
-                "wmic memorychip get capacity", shell=True)
-            lines = output.decode().split()
-            capacities = [int(x) for x in lines if x.isdigit()]
-            return round(sum(capacities) / (1024 ** 3), 2)
-
-        elif os_type == "Linux":
-            with open('/proc/meminfo', 'r') as f:
-                meminfo = f.read()
-            for line in meminfo.splitlines():
-                if "MemTotal" in line:
-                    kb = int(line.split()[1])
-                    return round(kb / (1024 ** 2), 2)
-
-        elif os_type == "Darwin":  # macOS
-            output = subprocess.check_output(["sysctl", "hw.memsize"])
-            mem_bytes = int(output.decode().split(":")[1].strip())
-            return round(mem_bytes / (1024 ** 3), 2)
-
-    except Exception as e:
-        return f"Error: {e}"
-
-
 def get_disk_usage():
-    os_type = platform.system()
     disks = []
-
     try:
-        if os_type == "Windows":
-            output = subprocess.check_output(
-                "wmic logicaldisk get deviceid,freespace,size", shell=True)
-            lines = output.decode().splitlines()[1:]
-            for line in lines:
-                parts = line.split()
-                if len(parts) == 3:
-                    device, free, size = parts
-                    if size.isdigit() and int(size) > 0:
-                        used_percent = 100 - (int(free) / int(size)) * 100
-                        disks.append({
-                            "Device": device,
-                            "Mount Point": device,
-                            "Usage (%)": round(used_percent, 2)
-                        })
-
-        elif os_type in ["Linux", "Darwin"]:
-            output = subprocess.check_output(["df", "-h", "/"])
-            lines = output.decode().splitlines()[1:]
-            for line in lines:
-                parts = line.split()
-                if len(parts) >= 6:
-                    device, size, used, avail, percent, mount = parts[:6]
-                    disks.append({
-                        "Device": device,
-                        "Mount Point": mount,
-                        "Usage (%)": percent
-                    })
-
+        partitions = psutil.disk_partitions()
+        for partition in partitions:
+            # Skip pseudo filesystems
+            if 'cdrom' in partition.opts or partition.fstype == '':
+                continue
+            
+            try:
+                usage = psutil.disk_usage(partition.mountpoint)
+                disks.append({
+                    "Device": partition.device,
+                    "Mount Point": partition.mountpoint,
+                    "File System Type": partition.fstype,
+                    "Total Size (GB)": round(usage.total / (1024 ** 3), 2),
+                    "Used (GB)": round(usage.used / (1024 ** 3), 2),
+                    "Free (GB)": round(usage.free / (1024 ** 3), 2),
+                    "Usage (%)": usage.percent
+                })
+            except PermissionError:
+                # Disk might not be accessible
+                continue
     except Exception as e:
         disks.append({"Error": str(e)})
 
@@ -88,24 +59,20 @@ def get_disk_usage():
 
 
 def get_logged_in_users():
-    users = []
+    users_list = []
     try:
-        output = subprocess.check_output("who", shell=True)
-        lines = output.decode().splitlines()
-        for line in lines:
-            parts = line.split()
-            if len(parts) >= 3:
-                username = parts[0]
-                login_time = " ".join(parts[2:4]) if len(
-                    parts) >= 4 else parts[2]
-                users.append({
-                    "Username": username,
-                    "Login Time": login_time
-                })
+        users = psutil.users()
+        for user in users:
+            login_time = datetime.fromtimestamp(user.started).strftime("%Y-%m-%d %H:%M:%S")
+            users_list.append({
+                "Username": user.name,
+                "Terminal": user.terminal,
+                "Login Time": login_time
+            })
     except Exception as e:
-        users.append({"Error": str(e)})
+        users_list.append({"Error": str(e)})
 
-    return users
+    return users_list
 
 
 def get_installed_software():
@@ -114,6 +81,7 @@ def get_installed_software():
 
     try:
         if os_type == "Windows":
+            # Keeping wmic for Windows as it's standard, though slow
             output = subprocess.check_output(
                 ['wmic', 'product', 'get', 'name'], shell=True)
             lines = output.decode(errors="ignore").split('\n')
@@ -125,25 +93,36 @@ def get_installed_software():
         elif os_type == "Linux":
             if os.path.exists("/usr/bin/dpkg"):
                 output = subprocess.check_output(['dpkg', '--get-selections'])
+                lines = output.decode(errors="ignore").split('\n')
+                for line in lines:
+                    if line:
+                        software_list.append(line.split()[0]) # Just the package name
             else:
                 output = subprocess.check_output(['rpm', '-qa'])
-            lines = output.decode(errors="ignore").split('\n')
-            for line in lines:
-                if line:
-                    software_list.append(line.strip())
+                lines = output.decode(errors="ignore").split('\n')
+                for line in lines:
+                    if line:
+                        software_list.append(line.strip())
 
         elif os_type == "Darwin":
-            output = subprocess.check_output(
-                ['system_profiler', 'SPApplicationsDataType'])
-            lines = output.decode(errors="ignore").split('\n')
-            for line in lines:
-                if "Location:" in line:
-                    software_list.append(line.strip())
+            # Using mdfind for faster lookup of apps in /Applications
+            # system_profiler is too slow and verbose
+            try:
+                output = subprocess.check_output(['mdfind', 'kMDItemContentType == "com.apple.application-bundle" -onlyin /Applications'])
+                lines = output.decode(errors="ignore").split('\n')
+                for line in lines:
+                    if line.strip():
+                        # Get just the app name from the path
+                        app_name = os.path.basename(line.strip())
+                        software_list.append(app_name)
+            except Exception:
+                # Fallback if mdfind fails
+                software_list.append("Error fetching software list")
 
     except Exception as e:
         software_list.append(f"Error fetching software list: {str(e)}")
 
-    return software_list
+    return sorted(software_list)
 
 
 REPORTS_FILE = "system_reports.json"
@@ -152,8 +131,11 @@ RUN_LOG_FILE = "run_log.json"
 
 def load_reports():
     if os.path.exists(REPORTS_FILE):
-        with open(REPORTS_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(REPORTS_FILE, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return []
     else:
         return []
 
@@ -165,8 +147,11 @@ def save_reports(reports):
 
 def load_run_log():
     if os.path.exists(RUN_LOG_FILE):
-        with open(RUN_LOG_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(RUN_LOG_FILE, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+             return {"run_count": 0, "last_run": None}
     else:
         return {"run_count": 0, "last_run": None}
 
@@ -180,6 +165,8 @@ if __name__ == "__main__":
     run_log = load_run_log()
     run_count = run_log.get("run_count", 0) + 1
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    print(f"🔄 Generating system audit report #{run_count}...")
 
     new_report = {
         "Report Number": run_count,
